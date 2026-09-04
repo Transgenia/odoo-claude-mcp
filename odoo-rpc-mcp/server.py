@@ -662,22 +662,38 @@ class OdooConnection:
             kwargs = {}
 
         self._log_fallback_once()
+        # Fase 0.C: OTel span per RPC call (no-op if tracing disabled).
         try:
-            if self.effective_protocol == "jsonrpc":
-                return self._jsonrpc_call(model, method, args, kwargs)
-            else:
-                transport = _UASafeTransport(context=self._get_ssl_context()) \
-                    if self.url.startswith("https") else _UATransport()
-                obj = xmlrpc.client.ServerProxy(
-                    f"{self.url}/xmlrpc/2/object",
-                    allow_none=True,
-                    transport=transport,
-                )
-                return obj.execute_kw(
-                    self.db, uid, self.auth_token, model, method, args, kwargs
-                )
-        except xmlrpc.client.Fault as e:
-            raise Exception(f"Odoo RPC fault: {e.faultString}")
+            import otel_bootstrap as _otel
+            _span_cm = _otel.start_span(
+                "odoo.execute_kw",
+                **{
+                    "odoo.model": model,
+                    "odoo.method": method,
+                    "odoo.alias": self.alias,
+                    "odoo.protocol": self.effective_protocol,
+                },
+            )
+        except ImportError:
+            import contextlib as _cl
+            _span_cm = _cl.nullcontext()
+        with _span_cm:
+            try:
+                if self.effective_protocol == "jsonrpc":
+                    return self._jsonrpc_call(model, method, args, kwargs)
+                else:
+                    transport = _UASafeTransport(context=self._get_ssl_context()) \
+                        if self.url.startswith("https") else _UATransport()
+                    obj = xmlrpc.client.ServerProxy(
+                        f"{self.url}/xmlrpc/2/object",
+                        allow_none=True,
+                        transport=transport,
+                    )
+                    return obj.execute_kw(
+                        self.db, uid, self.auth_token, model, method, args, kwargs
+                    )
+            except xmlrpc.client.Fault as e:
+                raise Exception(f"Odoo RPC fault: {e.faultString}")
 
     def _jsonrpc_call(
         self, model: str, method: str, args: list, kwargs: dict
@@ -5325,6 +5341,17 @@ def _github_api_call(endpoint: str, method: str = "GET",
 
 def _execute_tool(name: str, args: dict) -> Any:
     m = _mgr()
+
+    # Fase 0.E: VoBo middleware — preview by default (MCP_ENFORCE_VOBO=0):
+    # counts write-tool calls in Prometheus; only blocks when enforcement is on.
+    try:
+        import vobo_middleware as _vobo
+        if _vobo.is_write_tool(name):
+            _vobo_result = _vobo.check_vobo(name, args)
+            if not _vobo_result.ok:
+                return _vobo_result.as_error()
+    except ImportError:
+        pass
 
     # ── Connection management ──
     if name == "odoo_connect":
@@ -11195,6 +11222,15 @@ if __name__ == "__main__":
         _metrics.init(version=__version__)
     except Exception as _exc:
         logger.warning(f"metrics init failed: {_exc}")
+
+    # Fase 0.C: initialise OpenTelemetry tracing. No-op unless
+    # OTEL_EXPORTER_OTLP_ENDPOINT is set (degrades gracefully).
+    try:
+        import otel_bootstrap as _otel
+        _otel_live = _otel.init()
+        logger.info(f"otel_bootstrap init: enabled={_otel_live}")
+    except Exception as _exc:
+        logger.warning(f"otel init failed: {_exc}")
 
     # Kick off backup auto-rotation (if APScheduler + config present).
     try:
