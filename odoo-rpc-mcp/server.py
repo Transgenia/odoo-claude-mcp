@@ -7480,7 +7480,6 @@ def _execute_tool(name: str, args: dict) -> Any:
         limit = int(args.get("limit", 1000))
         offset = int(args.get("offset", 0))
         order = args.get("order", "")
-        import_compat = bool(args.get("import_compat", False))
 
         search_kw: dict[str, Any] = {"limit": limit, "offset": offset}
         if order:
@@ -7492,9 +7491,11 @@ def _execute_tool(name: str, args: dict) -> Any:
                 return {**base, "records": []}
             return {**base, "content_base64": "", "size": 0}
 
+        # Odoo 19 CE: BaseModel.export_data(fields_to_export) — NO import_compat
+        # kwarg (rejected with TypeError; import-compat lived in the old web
+        # export controller, not the model method). Verified live 2026-09-04.
         export_result = conn.execute_kw(
             model, "export_data", [ids, fields],
-            {"import_compat": import_compat},
         ) or {}
         rows = export_result.get("datas", []) if isinstance(export_result, dict) else []
 

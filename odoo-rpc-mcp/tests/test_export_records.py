@@ -171,22 +171,23 @@ def test_search_receives_limit_offset_order(fake_conn):
     assert kwargs == {"limit": 25, "offset": 5, "order": "name asc"}
 
 
-def test_export_data_receives_import_compat(fake_conn):
+def test_export_data_no_import_compat_kwarg_json(fake_conn):
+    # Odoo 19 CE: export_data() rejects import_compat — handler must NOT pass it.
     server._execute_tool("odoo_export_records_json", {
         "model": "res.partner",
         "fields": ["name"],
-        "import_compat": True,
+        "import_compat": True,  # accepted in schema but must be ignored on v19
     })
     _, method, _, kwargs = fake_conn.calls[1]
     assert method == "export_data"
-    assert kwargs == {"import_compat": True}
+    assert kwargs in (None, {})
 
 
-def test_import_compat_defaults_false(fake_conn):
+def test_export_data_no_import_compat_kwarg_csv(fake_conn):
     server._execute_tool("odoo_export_records_csv", {
         "model": "res.partner",
         "fields": ["name"],
     })
     _, method, _, kwargs = fake_conn.calls[1]
     assert method == "export_data"
-    assert kwargs == {"import_compat": False}
+    assert kwargs in (None, {})
