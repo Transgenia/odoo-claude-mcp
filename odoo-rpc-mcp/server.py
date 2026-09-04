@@ -6029,11 +6029,23 @@ def _execute_tool(name: str, args: dict) -> Any:
         )
 
     elif name == "odoo_fields_get":
-        return conn.execute_kw(
-            args["model"], "fields_get",
-            [],
-            {"attributes": args.get("attributes", ["string", "type", "required", "readonly", "relation"])},
-        )
+        # Fase 0.A: in-proc TTL schema cache (per alias). Degrades to direct
+        # RPC if cachetools/schema_cache missing. Invalidated by odoo_refresh.
+        attrs = args.get("attributes", ["string", "type", "required", "readonly", "relation"])
+        try:
+            import schema_cache as _sc
+            return _sc.get_fields(
+                conn.alias, args["model"], attrs,
+                lambda: conn.execute_kw(
+                    args["model"], "fields_get",
+                    [], {"attributes": attrs},
+                ),
+            )
+        except ImportError:
+            return conn.execute_kw(
+                args["model"], "fields_get",
+                [], {"attributes": attrs},
+            )
 
     elif name == "odoo_search":
         kw: dict[str, Any] = {"limit": args.get("limit", 80), "offset": args.get("offset", 0)}
@@ -7421,7 +7433,14 @@ def _execute_tool(name: str, args: dict) -> Any:
             "res.users", "notify_claude_refresh",
             [payload],
         )
-        return {"status": "refresh_sent", **payload}
+        # Fase 0.A: refresh signals possible server-side schema change
+        # (module install, field rename) — invalidate this alias' cache.
+        try:
+            import schema_cache as _sc
+            invalidated = _sc.invalidate(conn.alias)
+        except Exception:  # noqa: BLE001
+            invalidated = 0
+        return {"status": "refresh_sent", "cache_invalidated": invalidated, **payload}
 
     elif name == "odoo_export_records_json" or name == "odoo_export_records_csv":
         # Fase 0.B: declarative read-only export via ORM export_data.
