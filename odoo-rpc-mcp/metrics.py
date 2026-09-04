@@ -38,6 +38,10 @@ build_info: Optional["Gauge"] = None
 sessions_reaped: Optional["Counter"] = None
 store_sessions_active: Optional["Gauge"] = None
 store_sessions_orphaned: Optional["Gauge"] = None
+schema_cache_hits: Optional["Counter"] = None
+schema_cache_misses: Optional["Counter"] = None
+vobo_preview: Optional["Counter"] = None
+vobo_denial: Optional["Counter"] = None
 
 
 def init(version: str = "unknown") -> None:
@@ -45,6 +49,7 @@ def init(version: str = "unknown") -> None:
     global registry, tool_calls, proxy_discoveries, backup_writes
     global active_sessions, http_requests, build_info
     global sessions_reaped, store_sessions_active, store_sessions_orphaned
+    global schema_cache_hits, schema_cache_misses, vobo_preview, vobo_denial
     if not METRICS_ENABLED:
         return
     if registry is not None:
@@ -99,6 +104,31 @@ def init(version: str = "unknown") -> None:
     store_sessions_orphaned = Gauge(
         "mcp_store_sessions_orphaned",
         "Orphaned/revoked rows awaiting retention purge",
+        registry=registry,
+    )
+    schema_cache_hits = Counter(
+        "mcp_schema_cache_hits_total",
+        "In-proc schema cache hits (fields_get / name_get)",
+        ("cache",),
+        registry=registry,
+    )
+    schema_cache_misses = Counter(
+        "mcp_schema_cache_misses_total",
+        "In-proc schema cache misses (bypass or first fetch)",
+        ("cache",),
+        registry=registry,
+    )
+    vobo_preview = Counter(
+        "mcp_vobo_preview_total",
+        "VoBo middleware preview-mode calls (Fase 0.E). "
+        "would_block=1 = missing ejercicio + missing token; enforcement=off.",
+        ("tool", "would_block"),
+        registry=registry,
+    )
+    vobo_denial = Counter(
+        "mcp_vobo_denial_total",
+        "VoBo middleware denials (enforce=on and token missing).",
+        ("tool",),
         registry=registry,
     )
     build_info.labels(version=version).set(1)
@@ -163,6 +193,28 @@ def _path_group(path: str) -> str:
     if path == "/metrics":
         return "/metrics"
     return "other"
+
+
+def observe_schema_cache_hit(cache: str) -> None:
+    if METRICS_ENABLED and schema_cache_hits is not None:
+        schema_cache_hits.labels(cache=cache).inc()
+
+
+def observe_schema_cache_miss(cache: str) -> None:
+    if METRICS_ENABLED and schema_cache_misses is not None:
+        schema_cache_misses.labels(cache=cache).inc()
+
+
+def observe_vobo_preview(tool: str, would_block: bool) -> None:
+    if METRICS_ENABLED and vobo_preview is not None:
+        vobo_preview.labels(
+            tool=tool, would_block="1" if would_block else "0",
+        ).inc()
+
+
+def observe_vobo_denial(tool: str) -> None:
+    if METRICS_ENABLED and vobo_denial is not None:
+        vobo_denial.labels(tool=tool).inc()
 
 
 # ── Render endpoint body ──

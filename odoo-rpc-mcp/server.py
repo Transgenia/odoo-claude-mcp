@@ -2047,6 +2047,23 @@ def _resolve_mcp_user(url: str, db: str, login: str, api_key: str) -> tuple[str,
     return None
 
 
+def _frozen_aliases() -> set[str]:
+    """Aliases forbidden during the current pilot/tenant-gating phase.
+
+    Read from MCP_FROZEN_ALIASES (comma-separated). Empty by default.
+    Fase 0.D pilot guard, re-purposed for the multi-tenant product:
+    gate/suspend a tenant by freezing its alias without a redeploy.
+    """
+    raw = os.environ.get("MCP_FROZEN_ALIASES", "").strip()
+    if not raw:
+        return set()
+    return {a.strip() for a in raw.split(",") if a.strip()}
+
+
+def _alias_is_frozen(alias: str) -> bool:
+    return bool(alias) and alias in _frozen_aliases()
+
+
 _XMLRPC_UA = "OdooMcpAuth/1.0 (+https://mcp.odoo-shell.space)"
 
 
@@ -3249,6 +3266,64 @@ TOOLS = [
                     "default": 0,
                 },
             },
+        },
+    ),
+    # ── Export (read-only declarative wrappers around ORM export_data) ──
+    Tool(
+        name="odoo_export_records_json",
+        description=(
+            "Export records as a JSON list of dicts. Read-only ORM export "
+            "(respects security rules). Returns "
+            "{model, fields, count, records: [{field: value, ...}, ...]}."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name (e.g. 'res.partner')"},
+                "fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Field paths to export (dotted notation allowed, e.g. 'partner_id/name')",
+                },
+                "domain": {"type": "array", "default": [], "description": "Odoo domain filter"},
+                "limit": {"type": "integer", "default": 1000, "description": "Max records (safety cap)"},
+                "offset": {"type": "integer", "default": 0},
+                "order": {"type": "string", "default": ""},
+                "import_compat": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Odoo import-compatible formatting (external IDs for m2o)",
+                },
+            },
+            "required": ["model", "fields"],
+        },
+    ),
+    Tool(
+        name="odoo_export_records_csv",
+        description=(
+            "Export records as CSV (base64). Read-only ORM export "
+            "(respects security rules). Returns "
+            "{model, fields, count, content_base64, size}. Header row = field names."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "domain": {"type": "array", "default": []},
+                "limit": {"type": "integer", "default": 1000},
+                "offset": {"type": "integer", "default": 0},
+                "order": {"type": "string", "default": ""},
+                "import_compat": {"type": "boolean", "default": False},
+                "save_path": {
+                    "type": "string",
+                    "default": "",
+                    "description": "If set, write CSV to this path instead of returning base64",
+                },
+            },
+            "required": ["model", "fields"],
         },
     ),
     # ── Fiscal Position Configuration (l10n_bg_tax_admin) ──
@@ -7347,6 +7422,68 @@ def _execute_tool(name: str, args: dict) -> Any:
             [payload],
         )
         return {"status": "refresh_sent", **payload}
+
+    elif name == "odoo_export_records_json" or name == "odoo_export_records_csv":
+        # Fase 0.B: declarative read-only export via ORM export_data.
+        # Respects ir.model.access + record rules (same path Odoo UI uses).
+        model = args["model"]
+        fields = args["fields"]
+        if not fields:
+            return {"error": "fields is required and must be non-empty"}
+        domain = args.get("domain", [])
+        limit = int(args.get("limit", 1000))
+        offset = int(args.get("offset", 0))
+        order = args.get("order", "")
+        import_compat = bool(args.get("import_compat", False))
+
+        search_kw: dict[str, Any] = {"limit": limit, "offset": offset}
+        if order:
+            search_kw["order"] = order
+        ids = conn.execute_kw(model, "search", [domain], search_kw)
+        if not ids:
+            base = {"model": model, "fields": fields, "count": 0}
+            if name == "odoo_export_records_json":
+                return {**base, "records": []}
+            return {**base, "content_base64": "", "size": 0}
+
+        export_result = conn.execute_kw(
+            model, "export_data", [ids, fields],
+            {"import_compat": import_compat},
+        ) or {}
+        rows = export_result.get("datas", []) if isinstance(export_result, dict) else []
+
+        if name == "odoo_export_records_json":
+            records = [
+                {fields[i]: row[i] if i < len(row) else None for i in range(len(fields))}
+                for row in rows
+            ]
+            return {
+                "model": model, "fields": fields,
+                "count": len(records), "records": records,
+            }
+
+        # CSV branch
+        import csv as _csv, io as _io, base64 as _b64
+        buf = _io.StringIO()
+        writer = _csv.writer(buf, lineterminator="\n")
+        writer.writerow(fields)
+        for row in rows:
+            writer.writerow(["" if v is False or v is None else v for v in row])
+        content = buf.getvalue().encode("utf-8")
+        save_path = args.get("save_path", "")
+        if save_path:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(content)
+            return {
+                "model": model, "fields": fields, "count": len(rows),
+                "status": "saved", "path": save_path, "size": len(content),
+            }
+        return {
+            "model": model, "fields": fields, "count": len(rows),
+            "content_base64": _b64.b64encode(content).decode(),
+            "size": len(content),
+        }
 
     # ── Fiscal Position Configuration ──
     elif name == "odoo_fp_list":

@@ -32,3 +32,13 @@ APScheduler>=3.10.0
 # tool to package config keys with a temp password for the Odoo Setup Wizard.
 # stdlib zipfile can only READ encrypted zips, not WRITE. pyzipper extends it.
 pyzipper>=0.3.6
+# Fase 0.A (rescate 2026-09-03): in-proc TTL cache for fields_get / name_get to
+# cut redundant Odoo RPC hits. If missing, schema_cache degrades to
+# passthrough (cache disabled) — behaviour is unchanged.
+cachetools>=5.3.0
+# Fase 0.C (rescate 2026-09-03): OpenTelemetry OTLP HTTP tracing to Langfuse
+# (or any OTLP receiver). If missing, otel_bootstrap degrades to
+# no-op — no spans emitted, behaviour unchanged.
+opentelemetry-api>=1.25.0
+opentelemetry-sdk>=1.25.0
+opentelemetry-exporter-otlp-proto-http>=1.25.0
