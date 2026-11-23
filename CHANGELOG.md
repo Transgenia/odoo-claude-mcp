@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — default read language (Transgenia, 2026-11-23)
+
+Odoo returns translatable fields in `en_US` when an RPC call has no `lang`
+in its context, whatever the API user's language is. Once `en_US` holds a
+real English translation, agents reading without `lang` would get English
+silently.
+
+- `OdooConnection` now calls `res.users.context_get` once per connection,
+  right after `authenticate()`, and adds that `lang` to the context of read
+  methods only: `read`, `search_read`, `search`, `search_count`,
+  `name_search`, `web_read`, `web_search_read`, `read_group`,
+  `formatted_read_group`, `export_data`, `fields_get`.
+- An explicit `lang` in the caller's context always wins (`False` too).
+  Writes (`create`, `write`, `unlink`, ...) and every other method are sent
+  exactly as before.
+- Translation tools (`odoo_list_translatable_fields`,
+  `odoo_get_field_translations`, `odoo_translate_field`,
+  `odoo_translate_html`, `odoo_translate_context_aware`) run with the
+  default disabled: their RPCs are exactly the same as before.
+- If `context_get` fails, a warning is logged and reads behave as before.
+- New env var `ODOO_RPC_DEFAULT_LANG`: `user` (default), `off` (previous
+  behaviour, no extra RPC) or a fixed code such as `es_MX` (no extra RPC).
+- Not covered: the web-session tools (`OdooWebSession.call_kw`).
+- Tests: `odoo-rpc-mcp/tests/test_default_lang.py`.
+
 ## [2.30.3] — 2026-06-13 — Telegram file transfer (v2/v3 lockstep)
 
 Backport of the v3 3.0.7 feature: the Telegram MCP could only send/read text.
