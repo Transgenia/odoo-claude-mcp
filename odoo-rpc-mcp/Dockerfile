@@ -38,6 +38,10 @@ COPY --chmod=644 admin_filestore.py .
 COPY --chmod=644 metrics.py .
 COPY --chmod=644 bg_validators.py .
 COPY --chmod=644 pdf_sanitizer.py .
+# Fase 0 rescate (2026-09-03): in-proc schema cache, OTLP tracing, VoBo gating.
+COPY --chmod=644 schema_cache.py .
+COPY --chmod=644 otel_bootstrap.py .
+COPY --chmod=644 vobo_middleware.py .
 
 RUN useradd -m -s /bin/bash mcp && \
     mkdir -p /data && chown mcp:mcp /data

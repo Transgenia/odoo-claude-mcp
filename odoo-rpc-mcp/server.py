@@ -1111,6 +1111,24 @@ def _conn(args: dict) -> OdooConnection:
             return conn
         # Stale/unrehydratable descriptor → drop it, then refuse below.
         session_store_inst.delete_state(sc.session_key, "connection", "active")
+    # Transgenia p1 (2026-11-13): a unified_auth caller already proved
+    # Bearer + X-Odoo-Url/Db/Login for one of its registered aliases;
+    # bind that alias to this session instead of refusing.
+    caller = sc.caller or {}
+    auto_alias = caller.get("alias")
+    if (sc.principal and sc.principal_src == "unified_auth"
+            and auto_alias and auto_alias != "?"):
+        auto = {"source": "user_profile", "user": sc.principal, "alias": auto_alias}
+        try:
+            conn = _rehydrate_session_conn(sc, auto)
+        except Exception as e:
+            logger.warning(f"[SESSION] auto-bind failed for {sc.session_key}: {e}")
+            conn = None
+        if conn is not None:
+            session_runtime.set_conn(sc.session_key, conn)
+            session_store_inst.set_state(sc.session_key, "connection", "active", auto)
+            logger.info(f"[SESSION] auto-bound {auto_alias} to {sc.session_key}")
+            return conn
     raise _sm_error("MCP_NO_CONNECTION")
 
 
@@ -5590,7 +5608,8 @@ def _execute_tool(name: str, args: dict) -> Any:
             **session_info,
             "connections": list(conns.keys()),
             "active": active.get("alias", None),
-            "active_details": active,
+            "active_details": {k: v for k, v in active.items()
+                               if k not in ("api_key", "password")},
             "session_connection": conn_state,
             "telegram_phone": (tg_phone[:5] + "..." if tg_phone else None),
             "web_sessions": web_aliases,
