@@ -1459,11 +1459,17 @@ class OdooWebSession:
 
     def export_data(self, model: str, domain: list, fields: list,
                     import_compat: bool = False) -> Any:
-        """Export data via /web/export/csv."""
-        # First get record IDs
-        ids = self.call_kw(model, "search", [domain])
+        """Search and export through the authenticated web session's dataset API."""
+        lang = _default_lang_mode()
+        if lang == "user":
+            lang = ((self.session_info or {}).get("user_context") or {}).get("lang")
+            if not lang:
+                # Restoring a session cookie does not restore its login response.
+                lang = self.call_kw("res.users", "context_get").get("lang")
+        context = {"lang": lang} if lang and lang != "off" else {}
+        ids = self.call_kw(model, "search", [domain], {"context": context})
         return self.call_kw(model, "export_data", [ids, fields], {
-            "import_compat": import_compat,
+            "context": {**context, "import_compat": import_compat},
         })
 
     def get_report_pdf(self, report_name: str, ids: list) -> bytes:

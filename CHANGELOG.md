@@ -31,8 +31,12 @@ silently.
 - If `context_get` fails, a warning is logged and reads behave as before.
 - New env var `ODOO_RPC_DEFAULT_LANG`: `user` (default), `off` (previous
   behaviour, no extra RPC) or a fixed code such as `es_MX` (no extra RPC).
-- Not covered: the web-session tools (`OdooWebSession.call_kw`).
-- Tests: `odoo-rpc-mcp/tests/test_default_lang.py`.
+- `odoo_web_export` applies the selected language to both the domain search and
+  the exported values. It uses the authenticated web user's language in
+  `user` mode, including sessions restored from a cookie. The export format
+  flag `import_compat` now travels in the ORM context as required by Odoo 19.
+- Other web-session tools keep their existing context handling.
+- Tests: `odoo-rpc-mcp/tests/test_default_lang.py` and `test_export_records.py`.
 
 ## [2.30.3] — 2026-06-13 — Telegram file transfer (v2/v3 lockstep)
 

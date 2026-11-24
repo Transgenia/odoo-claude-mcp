@@ -191,3 +191,50 @@ def test_export_data_no_import_compat_kwarg_csv(fake_conn):
     _, method, _, kwargs = fake_conn.calls[1]
     assert method == "export_data"
     assert kwargs in (None, {})
+
+
+@pytest.mark.parametrize(
+    "mode,session_info,expected_lang,expected_lookup",
+    [
+        ("user", {"user_context": {"lang": "es_MX", "allowed_company_ids": [99], "uid": 7}},
+         "es_MX", False),
+        ("user", None, "de_DE", True),
+        ("de_DE", {"user_context": {"lang": "es_MX"}}, "de_DE", False),
+        ("off", {"user_context": {"lang": "es_MX"}}, None, False),
+    ],
+)
+@pytest.mark.parametrize("import_compat", [False, True])
+def test_web_export_passes_language_and_format_in_orm_context(
+    monkeypatch, mode, session_info, expected_lang, expected_lookup, import_compat
+):
+    monkeypatch.setenv("ODOO_RPC_DEFAULT_LANG", mode)
+    web = server.OdooWebSession("http://example.invalid", "fixture", "reader", "")
+    web.uid = 7
+    web.session_info = session_info
+    calls = []
+
+    def call_kw(model, method, args=None, kwargs=None):
+        calls.append((model, method, args, kwargs))
+        if method == "context_get":
+            return {"lang": "de_DE"}
+        if method == "search":
+            return [23]
+        if method == "export_data":
+            return {"datas": [["translated"]]}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(web, "call_kw", call_kw)
+    domain = [["id", "=", 23]]
+    assert web.export_data("product.template", domain, ["name"], import_compat) == {
+        "datas": [["translated"]]
+    }
+    assert [c[:2] for c in calls[:-2]] == (
+        [("res.users", "context_get")] if expected_lookup else []
+    )
+    expected_context = {"lang": expected_lang} if expected_lang else {}
+    assert calls[-2:] == [
+        ("product.template", "search", [domain], {"context": expected_context}),
+        ("product.template", "export_data", [[23], ["name"]], {
+            "context": {**expected_context, "import_compat": import_compat},
+        }),
+    ]
