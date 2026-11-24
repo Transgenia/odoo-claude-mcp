@@ -486,6 +486,51 @@ FP_ACTION_FIELDS = [
 
 
 # ─── Odoo RPC Client ───────────────────────────────────────
+# ─── Default read language (Transgenia, 2026-11-23) ────────
+# Odoo returns translatable fields in en_US when an RPC call carries no
+# `lang` in its context, whatever the API user's own language is. Once a
+# catalogue gets a real English translation in en_US, agents that read
+# without `lang` would silently receive English. OdooConnection therefore
+# resolves the API user's language once per connection
+# (res.users.context_get, right after authenticate) and adds it to the
+# context of READ methods only.
+#
+#   ODOO_RPC_DEFAULT_LANG=user    (default) language of the API user
+#   ODOO_RPC_DEFAULT_LANG=off     previous behaviour: no default lang
+#   ODOO_RPC_DEFAULT_LANG=es_MX   fixed language, no context_get call
+#
+# An explicit `lang` key in the caller's context always wins (False too).
+# Writes and any other method are never touched. Translation tools run
+# with the default disabled because they pass `lang` themselves.
+import contextvars as _lang_cv
+
+_READ_METHODS_DEFAULT_LANG = frozenset({
+    "read", "search_read", "search", "search_count", "name_search",
+    "web_read", "web_search_read", "read_group", "formatted_read_group",
+    "export_data", "fields_get",
+})
+_LANG_DEFAULT_EXEMPT_TOOLS = frozenset({
+    "odoo_list_translatable_fields",
+    "odoo_get_field_translations",
+    "odoo_translate_field",
+    "odoo_translate_html",
+    "odoo_translate_context_aware",
+})
+_default_lang_disabled: "_lang_cv.ContextVar[bool]" = _lang_cv.ContextVar(
+    "odoo_default_lang_disabled", default=False
+)
+
+
+def _default_lang_mode() -> str:
+    """'user', 'off' or a fixed language code, from ODOO_RPC_DEFAULT_LANG."""
+    raw = (os.environ.get("ODOO_RPC_DEFAULT_LANG") or "").strip()
+    if not raw or raw.lower() == "user":
+        return "user"
+    if raw.lower() in ("off", "none", "false", "0"):
+        return "off"
+    return raw
+
+
 class OdooConnection:
     """Manages a single Odoo RPC connection."""
 
@@ -512,6 +557,10 @@ class OdooConnection:
         self._auth_token: str = ""  # password or api_key
         self._ssl_ctx_cache: "ssl.SSLContext | None" = None
         self._fallback_logged: bool = False
+        # Default read language, resolved once by authenticate().
+        self._lang_mode: str = _default_lang_mode()
+        self._user_lang: str | None = None
+        self._user_lang_resolved: bool = False
 
     @property
     def auth_token(self) -> str:
@@ -642,10 +691,56 @@ class OdooConnection:
                     f"Authentication failed for {self.username}@{self.url}/{self.db}"
                 )
             logger.info(f"[{self.alias}] Authenticated as uid={self._uid}")
-            return self._uid
         except Exception as e:
             self._uid = None
             raise Exception(f"[{self.alias}] Auth error: {e}")
+        self._resolve_user_lang()
+        return self._uid
+
+    def _resolve_user_lang(self) -> None:
+        """Resolve the default read language once per authentication.
+
+        Never raises: if context_get fails, reads keep Odoo's own default
+        (en_US), which is the behaviour before this change.
+        """
+        self._user_lang_resolved = True
+        self._user_lang = None
+        if self._lang_mode == "off":
+            return
+        if self._lang_mode != "user":
+            self._user_lang = self._lang_mode
+            return
+        try:
+            ctx = self._dispatch_kw("res.users", "context_get", [], {})
+        except Exception as e:
+            logger.warning(
+                f"[{self.alias}] context_get failed, reads without lang "
+                f"stay in Odoo's default (en_US): {e}"
+            )
+            return
+        lang = ctx.get("lang") if isinstance(ctx, dict) else None
+        if isinstance(lang, str) and lang:
+            self._user_lang = lang
+            logger.info(f"[{self.alias}] default read language: {lang}")
+
+    def _with_default_lang(self, method: str, kwargs: dict) -> dict:
+        """Return kwargs with the default read language, when it applies.
+
+        Applies only to read methods, outside translation tools, when a
+        default language is known and the caller's context has no `lang`
+        key. Never mutates the caller's dict.
+        """
+        if method not in _READ_METHODS_DEFAULT_LANG or _default_lang_disabled.get():
+            return kwargs
+        lang = self._user_lang if self._user_lang_resolved else None
+        if not lang:
+            return kwargs
+        ctx = kwargs.get("context")
+        if ctx is None:
+            ctx = {}
+        elif not isinstance(ctx, dict) or "lang" in ctx:
+            return kwargs
+        return {**kwargs, "context": {**ctx, "lang": lang}}
 
     def execute_kw(
         self,
@@ -654,12 +749,17 @@ class OdooConnection:
         args: list | None = None,
         kwargs: dict | None = None,
     ) -> Any:
-        """Execute any Odoo model method via XML-RPC."""
-        uid = self.authenticate()
+        """Execute any Odoo model method via XML-RPC.
+
+        Read methods get the API user's language when the caller sets no
+        `lang` (see _READ_METHODS_DEFAULT_LANG and ODOO_RPC_DEFAULT_LANG).
+        """
+        self.authenticate()
         if args is None:
             args = []
         if kwargs is None:
             kwargs = {}
+        kwargs = self._with_default_lang(method, kwargs)
 
         self._log_fallback_once()
         # Fase 0.C: OTel span per RPC call (no-op if tracing disabled).
@@ -678,22 +778,28 @@ class OdooConnection:
             import contextlib as _cl
             _span_cm = _cl.nullcontext()
         with _span_cm:
-            try:
-                if self.effective_protocol == "jsonrpc":
-                    return self._jsonrpc_call(model, method, args, kwargs)
-                else:
-                    transport = _UASafeTransport(context=self._get_ssl_context()) \
-                        if self.url.startswith("https") else _UATransport()
-                    obj = xmlrpc.client.ServerProxy(
-                        f"{self.url}/xmlrpc/2/object",
-                        allow_none=True,
-                        transport=transport,
-                    )
-                    return obj.execute_kw(
-                        self.db, uid, self.auth_token, model, method, args, kwargs
-                    )
-            except xmlrpc.client.Fault as e:
-                raise Exception(f"Odoo RPC fault: {e.faultString}")
+            return self._dispatch_kw(model, method, args, kwargs)
+
+    def _dispatch_kw(
+        self, model: str, method: str, args: list, kwargs: dict
+    ) -> Any:
+        """Raw transport call: no default language, no span."""
+        uid = self.authenticate()
+        try:
+            if self.effective_protocol == "jsonrpc":
+                return self._jsonrpc_call(model, method, args, kwargs)
+            transport = _UASafeTransport(context=self._get_ssl_context()) \
+                if self.url.startswith("https") else _UATransport()
+            obj = xmlrpc.client.ServerProxy(
+                f"{self.url}/xmlrpc/2/object",
+                allow_none=True,
+                transport=transport,
+            )
+            return obj.execute_kw(
+                self.db, uid, self.auth_token, model, method, args, kwargs
+            )
+        except xmlrpc.client.Fault as e:
+            raise Exception(f"Odoo RPC fault: {e.faultString}")
 
     def _jsonrpc_call(
         self, model: str, method: str, args: list, kwargs: dict
@@ -5358,6 +5464,21 @@ def _github_api_call(endpoint: str, method: str = "GET",
 
 
 def _execute_tool(name: str, args: dict) -> Any:
+    """Dispatch one tool call.
+
+    Translation tools (and anything they call) run without the default read
+    language, because they pass `lang` explicitly.
+    """
+    token = _default_lang_disabled.set(
+        _default_lang_disabled.get() or name in _LANG_DEFAULT_EXEMPT_TOOLS
+    )
+    try:
+        return _execute_tool_impl(name, args)
+    finally:
+        _default_lang_disabled.reset(token)
+
+
+def _execute_tool_impl(name: str, args: dict) -> Any:
     m = _mgr()
 
     # Fase 0.E: VoBo middleware — preview by default (MCP_ENFORCE_VOBO=0):
