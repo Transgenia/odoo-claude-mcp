@@ -13,7 +13,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -106,6 +108,48 @@ def test_context_get_called_once_per_connection(fake):
     for _ in range(3):
         conn.execute_kw("product.template", "read", [[1]], {"fields": ["name"]})
     assert fake.context_get_count() == 1
+
+
+def test_concurrent_first_reads_wait_for_language(fake, monkeypatch):
+    conn = _conn()
+    resolving = Event()
+    second_reader_reached = Event()
+    dispatch = conn._dispatch_kw
+
+    def observe_dispatch(model, method, args, kwargs):
+        if method == "context_get":
+            resolving.set()
+            assert second_reader_reached.wait(5)
+        else:
+            # A premature read has already chosen its outgoing context.
+            second_reader_reached.set()
+        return dispatch(model, method, args, kwargs)
+
+    monkeypatch.setattr(conn, "_dispatch_kw", observe_dispatch)
+    if hasattr(conn, "_auth_lock"):
+        lock = conn._auth_lock
+
+        class ObservedLock:
+            def __enter__(self):
+                if not lock.acquire(blocking=False):
+                    # The second reader reached initialization and must wait.
+                    second_reader_reached.set()
+                    assert lock.acquire(timeout=5)
+
+            def __exit__(self, *exc):
+                lock.release()
+
+        monkeypatch.setattr(conn, "_auth_lock", ObservedLock())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(conn.execute_kw, "product.template", "read", [[1]])
+        assert resolving.wait(5)
+        second = pool.submit(conn.execute_kw, "product.template", "read", [[2]])
+        first.result(timeout=10)
+        second.result(timeout=10)
+
+    assert fake.context_get_count() == 1
+    assert [call[3] for call in fake.data_calls()] == [{"context": {"lang": "es_MX"}}] * 2
 
 
 @pytest.mark.parametrize("method", sorted(server._READ_METHODS_DEFAULT_LANG))

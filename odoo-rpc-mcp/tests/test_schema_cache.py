@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -58,6 +59,44 @@ def test_attributes_order_insensitive():
     schema_cache.get_fields("a", "m", ["a", "b"], fetcher)
     schema_cache.get_fields("a", "m", ["b", "a"], fetcher)
     assert calls["n"] == 1, "attributes tuple must be normalized"
+
+
+@pytest.mark.parametrize("first,second", [("es_MX", "de_DE"), ("de_DE", "es_MX")])
+def test_fields_get_tool_caches_labels_per_language(monkeypatch, first, second):
+    import server
+
+    # Two cold connections to the same database share an alias, model and attributes.
+    monkeypatch.setattr(schema_cache, "ENABLED", True)
+    monkeypatch.setenv("ODOO_RPC_DEFAULT_LANG", "user")
+    monkeypatch.setattr(server, "_mgr", lambda: None)
+    labels = {"es_MX": "Nombre", "de_DE": "Bezeichnung"}
+    user_languages = {1: "es_MX", 2: "de_DE"}
+    fetched = []
+
+    def execute_kw(db, uid, token, model, method, args, kwargs):
+        if method == "context_get":
+            return {"lang": user_languages[uid]}
+        assert method == "fields_get"
+        lang = kwargs["context"]["lang"]
+        fetched.append(lang)
+        return {"name": {"string": labels[lang]}}
+
+    proxy = Mock()
+    proxy.authenticate.side_effect = lambda db, login, token, ctx: int(login)
+    proxy.execute_kw.side_effect = execute_kw
+    monkeypatch.setattr(server.xmlrpc.client, "ServerProxy", lambda *a, **kw: proxy)
+    conns = {
+        lang: server.OdooConnection("default", "http://odoo.invalid", "test", str(uid))
+        for uid, lang in user_languages.items()
+    }
+    for lang in (first, second, first, second):
+        monkeypatch.setattr(server, "_conn", lambda args, conn=conns[lang]: conn)
+        result = server._execute_tool("odoo_fields_get", {
+            "model": "demo.item", "attributes": ["string"],
+        })
+        assert result["name"]["string"] == labels[lang]
+    assert fetched == [first, second]
+    assert schema_cache.invalidate("default") == 2
 
 
 def test_different_alias_is_separate_key():

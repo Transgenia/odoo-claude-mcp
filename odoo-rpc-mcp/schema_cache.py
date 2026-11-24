@@ -1,7 +1,7 @@
 """In-process schema cache (Fase 0.A).
 
-Caches results of expensive ``fields_get`` / ``name_get`` calls keyed
-by (alias, model, attributes_tuple). Bounded by TTL and max entries.
+Caches ``fields_get`` by alias, model, requested attributes and language,
+and ``name_get`` by alias, model and IDs. Bounded by TTL and max entries.
 
 Design choices (see plan.md §Fase 0.A):
   * In-proc, no Redis. Adds one dep (cachetools) that is well-scoped.
@@ -75,6 +75,8 @@ def get_fields(
     model: str,
     attributes: Optional[Iterable[str]],
     fetcher: Callable[[], Any],
+    *,
+    lang: Optional[str] = None,
 ) -> Any:
     """Cache-through wrapper around a ``fields_get`` call.
 
@@ -84,7 +86,7 @@ def get_fields(
     if not ENABLED:
         _emit("fields", False)
         return fetcher()
-    key = (alias, model, _norm_attrs(attributes))
+    key = (alias, model, _norm_attrs(attributes), lang)
     with _lock:
         val = _fields_cache.get(key)
     if val is not None:
