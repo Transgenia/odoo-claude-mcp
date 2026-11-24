@@ -19,6 +19,8 @@ silently.
   methods only: `read`, `search_read`, `search`, `search_count`,
   `name_search`, `web_read`, `web_search_read`, `read_group`,
   `formatted_read_group`, `export_data`, `fields_get`.
+- Concurrent first reads on a shared connection wait for language resolution.
+- `odoo_fields_get` caches translated field labels by effective read language.
 - An explicit `lang` in the caller's context always wins (`False` too).
   Writes (`create`, `write`, `unlink`, ...) and every other method are sent
   exactly as before.

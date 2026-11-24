@@ -503,6 +503,7 @@ FP_ACTION_FIELDS = [
 # Writes and any other method are never touched. Translation tools run
 # with the default disabled because they pass `lang` themselves.
 import contextvars as _lang_cv
+from threading import RLock
 
 _READ_METHODS_DEFAULT_LANG = frozenset({
     "read", "search_read", "search", "search_count", "name_search",
@@ -553,6 +554,7 @@ class OdooConnection:
         self.api_key = api_key
         self.protocol = protocol  # xmlrpc or jsonrpc
         self.verify_ssl = verify_ssl
+        self._auth_lock = RLock()
         self._uid: int | None = None
         self._auth_token: str = ""  # password or api_key
         self._ssl_ctx_cache: "ssl.SSLContext | None" = None
@@ -664,7 +666,12 @@ class OdooConnection:
         return ctx
 
     def authenticate(self) -> int:
-        """Authenticate via XML-RPC and return uid."""
+        """Return the UID once authentication and language resolution finish."""
+        # context_get re-enters authenticate() on its way to the transport.
+        with self._auth_lock:
+            return self._authenticate_locked()
+
+    def _authenticate_locked(self) -> int:
         if self._uid is not None:
             return self._uid
 
@@ -723,6 +730,13 @@ class OdooConnection:
             self._user_lang = lang
             logger.info(f"[{self.alias}] default read language: {lang}")
 
+    @property
+    def read_language(self) -> str | None:
+        """Effective default for reads after authentication; None omits lang."""
+        if _default_lang_disabled.get() or not self._user_lang_resolved:
+            return None
+        return self._user_lang
+
     def _with_default_lang(self, method: str, kwargs: dict) -> dict:
         """Return kwargs with the default read language, when it applies.
 
@@ -730,9 +744,9 @@ class OdooConnection:
         default language is known and the caller's context has no `lang`
         key. Never mutates the caller's dict.
         """
-        if method not in _READ_METHODS_DEFAULT_LANG or _default_lang_disabled.get():
+        if method not in _READ_METHODS_DEFAULT_LANG:
             return kwargs
-        lang = self._user_lang if self._user_lang_resolved else None
+        lang = self.read_language
         if not lang:
             return kwargs
         ctx = kwargs.get("context")
@@ -6196,17 +6210,19 @@ def _execute_tool_impl(name: str, args: dict) -> Any:
         )
 
     elif name == "odoo_fields_get":
-        # Fase 0.A: in-proc TTL schema cache (per alias). Degrades to direct
+        # Fase 0.A: in-proc TTL schema cache (per alias and language). Degrades to direct
         # RPC if cachetools/schema_cache missing. Invalidated by odoo_refresh.
         attrs = args.get("attributes", ["string", "type", "required", "readonly", "relation"])
         try:
             import schema_cache as _sc
+            conn.authenticate()  # Resolve the language even on the first cache lookup.
             return _sc.get_fields(
                 conn.alias, args["model"], attrs,
                 lambda: conn.execute_kw(
                     args["model"], "fields_get",
                     [], {"attributes": attrs},
                 ),
+                lang=conn.read_language,
             )
         except ImportError:
             return conn.execute_kw(
